@@ -1,54 +1,104 @@
 import { StyleSheet, FlatList, TouchableOpacity, Image, Platform } from 'react-native';
-import { useState, useEffect } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { MarkdownLatex } from '@/components/MarkdownLatex';
-
-type HistoryItem = {
-  id: string;
-  question: string;
-  answer: string;
-  timestamp: number;
-  type: 'text' | 'image';
-  imageUri?: string;
-};
+import { chatHistory, ChatSession } from '@/services/chat/history';
 
 export default function HistoryScreen() {
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const navigation = useNavigation();
+  const [history, setHistory] = useState<ChatSession[]>([]);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const isInitialized = useRef(false);
 
+  const loadHistory = useCallback(async (pageNum: number) => {
+    if (isLoading) return;
+    setIsLoading(true);
+    try {
+      console.log('加载历史记录...', pageNum);
+      const items = await chatHistory.loadHistory(pageNum);
+      if (pageNum === 0) {
+        setHistory(items);
+      } else {
+        setHistory(prev => [...prev, ...items]);
+      }
+      setHasMore(await chatHistory.hasMoreHistory(pageNum));
+      console.log('加载历史记录完成', items.length);
+    } catch (error) {
+      console.error('加载历史记录失败:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isLoading]);
+
+  // 只在组件首次挂载时初始化
   useEffect(() => {
-    loadHistory();
+    if (!isInitialized.current) {
+      console.log('历史页面首次初始化');
+      isInitialized.current = true;
+      chatHistory
+        .initialize()
+        .then(() => loadHistory(0))
+        .catch(error => console.error('初始化失败:', error));
+    }
+  }, [loadHistory]);
+
+  // useFocusEffect(
+  //   useCallback(() => {
+  //     console.log('历史页面聚焦');
+  //     loadHistory(0);
+  //   }, [loadHistory])
+  // );
+
+  const formatDate = useCallback((timestamp: number) => {
+    return new Date(timestamp).toLocaleString();
   }, []);
 
-  const loadHistory = async () => {
-    try {
-      const stored = await AsyncStorage.getItem('history');
-      if (stored) {
-        setHistory(JSON.parse(stored));
-      }
-    } catch (error) {
-      console.error('Failed to load history:', error);
+  const loadMore = useCallback(() => {
+    if (hasMore && !isLoading) {
+      const nextPage = page + 1;
+      setPage(nextPage);
+      loadHistory(nextPage);
     }
-  };
+  }, [hasMore, isLoading, page, loadHistory]);
 
-  const toggleExpand = (id: string) => {
-    setExpandedItems(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
+  const handleRefresh = useCallback(() => {
+    setPage(0);
+    loadHistory(0);
+  }, [loadHistory]);
 
-  const formatDate = (timestamp: number) => {
-    return new Date(timestamp).toLocaleString();
-  };
+  const handleSessionPress = useCallback((sessionId: string) => {
+    navigation.navigate('index', { sessionId });
+  }, [navigation]);
+
+  const renderItem = useCallback(({ item }: { item: ChatSession }) => (
+    <TouchableOpacity
+      style={styles.historyItem}
+      onPress={() => handleSessionPress(item.id)}
+    >
+      <ThemedView style={styles.questionContainer}>
+        {item.type === 'image' && item.imageUri && (
+          <Image
+            source={{ uri: item.imageUri }}
+            style={styles.thumbnail}
+          />
+        )}
+        <ThemedText style={styles.title}>{item.title}</ThemedText>
+      </ThemedView>
+
+      <ThemedText style={styles.messageCount}>
+        {Object.keys(item.messages).length} 条对话
+      </ThemedText>
+
+      <ThemedText style={styles.date}>
+        {formatDate(item.timestamp)}
+      </ThemedText>
+    </TouchableOpacity>
+  ), [handleSessionPress, formatDate]);
 
   return (
     <ThemedView style={styles.container}>
@@ -58,37 +108,12 @@ export default function HistoryScreen() {
 
       <FlatList
         data={history}
-        renderItem={({ item }) => (
-          <TouchableOpacity 
-            style={styles.historyItem}
-            onPress={() => toggleExpand(item.id)}
-          >
-            <ThemedView style={styles.questionContainer}>
-              {item.type === 'image' && item.imageUri && (
-                <Image 
-                  source={{ uri: item.imageUri }} 
-                  style={styles.thumbnail}
-                />
-              )}
-              <ThemedText style={styles.question}>{item.question}</ThemedText>
-            </ThemedView>
-            
-            {expandedItems.has(item.id) && (
-              <ThemedView style={styles.answerContainer}>
-                <MarkdownLatex
-                  content={item.answer}
-                  textColor="#333"
-                  baseStyles={{
-                    body: styles.answer,
-                  }}
-                />
-              </ThemedView>
-            )}
-            
-            <ThemedText style={styles.date}>{formatDate(item.timestamp)}</ThemedText>
-          </TouchableOpacity>
-        )}
-        keyExtractor={(item) => item.id}
+        renderItem={renderItem}
+        keyExtractor={item => item.id}
+        onEndReached={loadMore}
+        onEndReachedThreshold={0.5}
+        refreshing={isLoading}
+        onRefresh={handleRefresh}
       />
     </ThemedView>
   );
@@ -121,20 +146,14 @@ const styles = StyleSheet.create({
     height: 50,
     borderRadius: 4,
   },
-  question: {
+  title: {
     flex: 1,
     fontSize: 16,
     fontWeight: '500',
   },
-  answerContainer: {
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#e0e0e0',
-  },
-  answer: {
-    fontSize: 14,
-    color: '#333',
+  messageCount: {
+    fontSize: 12,
+    color: '#666',
   },
   date: {
     fontSize: 12,

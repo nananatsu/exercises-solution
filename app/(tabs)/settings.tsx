@@ -1,12 +1,13 @@
 import { StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, Share, Platform } from 'react-native';
 import { useState, useEffect } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+// import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { IconSymbol } from '@/components/ui/IconSymbol';
+import { storage } from '@/services/storage';
 
 type ModelType = 'mm' | 'vl' | 'text';
 
@@ -63,9 +64,8 @@ export default function SettingsScreen() {
 
     const loadSettings = async () => {
         try {
-            const stored = await AsyncStorage.getItem('settings');
-            if (stored) {
-                const settings = JSON.parse(stored);
+            const settings = await storage.getItem('settings');
+            if (settings) {
                 const mergedSettings = {
                     ...defaultSettings,
                     ...settings,
@@ -79,7 +79,7 @@ export default function SettingsScreen() {
 
     const saveSettings = async (newSettings: Settings) => {
         try {
-            await AsyncStorage.setItem('settings', JSON.stringify(newSettings));
+            await storage.setItem('settings', newSettings);
             setSettings(newSettings);
             return true;
         } catch (error) {

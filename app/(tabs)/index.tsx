@@ -1,8 +1,8 @@
 import { StyleSheet, TouchableOpacity, TextInput, FlatList, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Camera } from 'expo-camera';
-import { useState, useEffect } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { storage } from '@/services/storage';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
@@ -10,36 +10,14 @@ import { IconSymbol } from '@/components/ui/IconSymbol';
 import { MarkdownLatex } from '@/components/MarkdownLatex';
 import { compressImage, imageToBase64 } from '@/utils/imageUtils';
 import { uploadImage } from '@/services/imageHost';
-import { createOpenAI } from '@/services/openai';
+import { imageCache } from '@/services/imageCache';
+import { chatHistory } from '@/services/chat/history';
+import { MessageControls } from '@/components/MessageControls';
+import { ChatSession, ChatMessage, ChatConf } from '@/services/chat/types';
+import { Session } from '@/services/chat/session';
+import { EditMessageDialog } from '@/components/EditMessageDialog';
 
-type HistoryItem = {
-  id: string;
-  question: string;
-  answer: string;
-  timestamp: number;
-  type: 'text' | 'image';
-  imageUri?: string;
-};
-
-type Message = {
-  id: string;
-  type: 'user' | 'assistant';
-  content: string;
-  timestamp: number;
-  imageUri?: string;
-};
-
-interface Settings {
-  models: Array<{
-    title: string;
-    type: 'mm' | 'vl' | 'text';
-    model: string;
-    apiBase: string;
-    apiKey: string;
-    provider: string;
-  }>;
-  activeOCRModel: string;
-  activeSolvingModel: string;
+interface Settings extends ChatConf {
   imageHost: {
     type: string;
     apiKey: string;
@@ -55,10 +33,15 @@ interface ProcessQuestionOptions {
 }
 
 export default function HomeScreen() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [session, setSession] = useState<Session | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [settings, setSettings] = useState<Settings | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<{
+    message: ChatMessage;
+    turn: number;
+  } | null>(null);
 
   useEffect(() => {
     loadSettings();
@@ -66,102 +49,101 @@ export default function HomeScreen() {
 
   const loadSettings = async () => {
     try {
-      const stored = await AsyncStorage.getItem('settings');
-      if (stored) {
-        setSettings(JSON.parse(stored));
+      const settings = await storage.getItem<Settings>('settings');
+      if (settings) {
+        setSettings(settings);
       }
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
   };
 
-  const processQuestion = async (options: ProcessQuestionOptions) => {
-    if (!settings?.activeSolvingModel) {
-      Alert.alert('错误', '请先在设置中选择解题模型');
-      return;
-    }
+  const createSession = async () => {
+    console.log("初始化会话")
+    const sessionId = await chatHistory.getNextSessionId();
+    console.log("创建会话", sessionId)
+    const session = new Session(
+      {
+        models: settings?.models || [],
+        activeOCRModel: settings?.activeOCRModel || '',
+        activeSolvingModel: settings?.activeSolvingModel || ''
+      },
+      {
+        id: sessionId,
+        title: '',
+        turns: [],
+        timestamp: Date.now()
+      },
+      {}
+    );
 
-    setIsLoading(true);
+    console.log("更新会话状态·", session)
+    setSession(session);
+    setMessages(session.currentMessages);
+  }
+
+  const loadSession = useCallback(async (sessionId: string) => {
     try {
-      const solvingModel = settings.models.find(m => m.title === settings.activeSolvingModel);
-      if (!solvingModel) {
-        throw new Error('解题模型未找到');
+      const chatSession = await chatHistory.getSession(sessionId);
+      if (chatSession) {
+        const messages = await chatHistory.getMessages(chatSession);
+        const session = new Session(
+          {
+            models: settings?.models || [],
+            activeOCRModel: settings?.activeOCRModel || '',
+            activeSolvingModel: settings?.activeSolvingModel || ''
+          },
+          chatSession,
+          messages
+        );
+        setSession(session);
+        setMessages(session.currentMessages);
+      }
+    } catch (error) {
+      console.error('加载会话失败:', error);
+      Alert.alert('错误', '加载会话失败');
+    }
+  }, []);
+
+  const processQuestion = async (options: ProcessQuestionOptions) => {
+    try {
+      setIsLoading(true);
+
+      if (!session) {
+        await createSession();
+        console.log("会话状态", session)
       }
 
       let questionText = options.text || '';
       let imageUrl = options.imageUri;
-      const displayUri = options.originalUri || options.imageUri; // 用于显示的URI
 
-      // 如果有图片且是文本模型，需要先进行OCR
-      if (imageUrl && solvingModel.type === 'text') {
-        if (!settings.activeOCRModel) {
-          throw new Error('请先选择题目识别模型');
-        }
-        const ocrModel = settings.models.find(m => m.title === settings.activeOCRModel);
-        if (!ocrModel) {
-          throw new Error('题目识别模型未找到');
-        }
+      console.log("创建用户消息", questionText, imageUrl)
 
-        questionText = await recognizeText(imageUrl, ocrModel);
+      await session?.createUserMessage({
+        text: questionText,
+        imageUri: imageUrl,
+        originalUri: options.originalUri
+      });
 
-        console.log('识别后的题目', questionText);
-        return;
+      // 获取LLM回复
+      const answer = await session?.chat();
+      if (answer) {
+        await session?.createAssistantMessage(answer);
       }
 
-      // 添加用户消息
-      const userMessage: Message = {
-        id: Date.now().toString(),
-        type: 'user',
-        content: options.isCamera ? '拍照题目' : (questionText || '图片题目'),
-        timestamp: Date.now(),
-        imageUri: displayUri, // 使用原始URI用于显示
-      };
-      setMessages(prev => [...prev, userMessage]);
+      // 更新界面
+      setMessages(session?.currentMessages || []);
+      setInputText('');
 
-      // 发送到解题模型
-      const response = await solveQuestion(
-        solvingModel,
-        questionText,
-        imageUrl, // 使用处理后的URL
-        solvingModel.type === 'mm'
-      );
-
-      // 添加AI回复
-      const aiMessage: Message = {
-        id: Date.now().toString(),
-        type: 'assistant',
-        content: response,
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [...prev, aiMessage]);
-
-      // 保存到历史记录
-      const historyItem: HistoryItem = {
-        id: Date.now().toString(),
-        question: options.isCamera ? '拍照题目' : (options.text || '图片题目'),
-        answer: response,
-        timestamp: Date.now(),
-        type: imageUrl ? 'image' : 'text',
-        imageUri: displayUri, // 使用原始URI用于显示
-      };
-      await saveToHistory(historyItem);
     } catch (error) {
-      console.error('Process question failed:', error);
-      Alert.alert('错误', error instanceof Error ? error.message : '处理题目失败');
+      console.error('处理问题失败:', error);
+      Alert.alert('错误', error instanceof Error ? error.message : '处理失败');
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleSend = async () => {
-    if (!inputText.trim() || !settings?.activeSolvingModel) return;
-
-    const solvingModel = settings.models.find(m => m.title === settings.activeSolvingModel);
-    if (!solvingModel) {
-      Alert.alert('错误', '请先在设置中选择解题模型');
-      return;
-    }
-
     const text = inputText.trim();
     setInputText('');
 
@@ -170,140 +152,47 @@ export default function HomeScreen() {
 
   const processImage = async (imageUri: string, isCamera: boolean = false) => {
     try {
+      setIsLoading(true);
       // 压缩图片
       const compressedUri = await compressImage(imageUri);
       const base64 = await imageToBase64(compressedUri);
       let imageUrl = "";
-      let originalUri = compressedUri;
+      let originalUri = `data:image/jpeg;base64,${base64}`;
 
-      // 上传到图床
-      if (settings?.imageHost?.apiKey) {
-        const uploadResult = await uploadImage(base64, settings.imageHost);
-        if (uploadResult.success && uploadResult.url) {
-          imageUrl = uploadResult.url;
+      // 检查缓存
+      const cachedUrl = await imageCache.getCachedUrl(originalUri);
+      if (cachedUrl) {
+        console.log('图片已缓存:', cachedUrl.uploadedUrl);
+        imageUrl = cachedUrl.uploadedUrl;
+      } else {
+        // 上传到图床
+        if (settings?.imageHost?.apiKey) {
+          console.log('上传图片...');
+          const uploadResult = await uploadImage(base64, settings.imageHost);
+          if (uploadResult.success && uploadResult.url) {
+            console.log('上传图片成功:', uploadResult.url);
+            // 缓存上传结果
+            await imageCache.cacheUrl(originalUri, uploadResult.url);
+            imageUrl = uploadResult.url;
+          }
         }
       }
-      // 如果没有配置图床或上传失败，使用base64
       if (!imageUrl) {
-        imageUrl = `data:image/jpeg;base64,${base64}`;
+        // 如果没有配置图床或上传失败，使用base64
+        imageUrl = originalUri;
+        originalUri = "";
       }
 
-      await processQuestion({ imageUri: imageUrl, isCamera, originalUri: originalUri });
+      await processQuestion({
+        imageUri: imageUrl,
+        isCamera,
+        originalUri
+      });
     } catch (error) {
       console.error('Process image failed:', error);
       Alert.alert('错误', '处理图片失败');
-    }
-  };
-
-  const recognizeText = async (imageUrl: string, model: Settings['models'][0]): Promise<string> => {
-    try {
-      const client = createOpenAI({
-        apiKey: model.apiKey,
-        apiBase: model.apiBase,
-      });
-
-      const response = await client.chat.completions.create({
-        model: model.model,
-        messages: [
-          {
-            role: 'system',
-            content: `你是一个专业的题目识别助手，主要负责识别数学、物理、化学等学科的试题。
-
-请注意以下要求：
-1. 只识别纯文字题目，如果题目包含数学公式、化学方程式等非纯文字内容，则返回识别失败
-2. 对于数学符号，需要转换为 LaTeX 格式
-3. 返回格式必须是合法的 JSON 字符串：{ "success": boolean, "text": string }
-   - success: true 表示识别成功，false 表示识别失败
-   - text: 识别成功时返回题目文本，失败时返回失败原因
-
-示例输出：
-成功：{"success":true,"text":"已知函数f(x)=2x+1，求f(3)的值。"}
-失败：{"success":false,"text":"题目包含数学公式，无法识别"}`,
-          },
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image_url',
-                image_url: {
-                  url: imageUrl,
-                },
-              },
-              {
-                type: 'text',
-                text: '请识别这道题目。如果题目包含公式或其他非纯文字内容，请返回识别失败。',
-              },
-            ],
-          },
-        ],
-        response_format: { type: 'json_object' },
-      });
-
-      const result = JSON.parse(response.choices[0].message.content || '');
-      if (!result.success) {
-        throw new Error(result.text);
-      }
-
-      console.log('识别结果：', result);
-      return result.text;
-    } catch (error) {
-      console.error('OCR failed:', error);
-      throw new Error(error instanceof Error ? error.message : '识别文字失败');
-    }
-  };
-
-  const solveQuestion = async (
-    model: Settings['models'][0],
-    text: string,
-    imageUrl?: string,
-    isMultimodal: boolean = false
-  ): Promise<string> => {
-    try {
-      const client = createOpenAI({
-        apiKey: model.apiKey,
-        apiBase: model.apiBase,
-      });
-
-      const messages = isMultimodal && imageUrl ? [
-        {
-          role: 'system',
-          content: '你是一个专业的解题助手，请帮助分析题目并给出详细的解题步骤。',
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image_url',
-              image_url: {
-                url: imageUrl,
-              },
-            },
-            {
-              type: 'text',
-              text: '请解答这道题目，给出详细的解题步骤。',
-            },
-          ],
-        },
-      ] : [
-        {
-          role: 'system',
-          content: '你是一个专业的解题助手，请帮助分析题目并给出详细的解题步骤。',
-        },
-        {
-          role: 'user',
-          content: text,
-        },
-      ];
-
-      const response = await client.chat.completions.create({
-        model: model.model,
-        messages,
-      });
-
-      return response.choices[0].message.content || '';
-    } catch (error) {
-      console.error('Solve question failed:', error);
-      throw new Error('解题失败');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -337,43 +226,124 @@ export default function HomeScreen() {
       await processImage(result.assets[0].uri, false);
     }
   };
+  // 处理消息编辑
+  const handleEditMessage = useCallback((message: ChatMessage, turn: number) => {
+    setEditingMessage({ message, turn });
+  }, []);
 
-  const saveToHistory = async (item: HistoryItem) => {
+  // 保存编辑后的消息
+  const handleSaveEdit = useCallback(async (text: string) => {
+    if (!editingMessage || !session) return;
+
     try {
-      const stored = await AsyncStorage.getItem('history');
-      const history: HistoryItem[] = stored ? JSON.parse(stored) : [];
-      history.unshift(item); // 添加到开头
-      await AsyncStorage.setItem('history', JSON.stringify(history));
-    } catch (error) {
-      console.error('Failed to save history:', error);
-    }
-  };
+      setIsLoading(true);
 
-  const renderMessage = ({ item }: { item: Message }) => (
-    <ThemedView
-      style={[
-        styles.messageContainer,
-        item.type === 'user' ? styles.userMessage : styles.assistantMessage
-      ]}
-    >
-      {item.type === 'assistant' ? (
-        <MarkdownLatex
-          content={item.content}
-          textColor={item.type === 'user' ? '#FFFFFF' : '#000000'}
-          baseStyles={{
-            body: [
-              styles.markdownBody,
-              item.type === 'user' ? styles.userMessageText : styles.assistantMessageText,
-            ],
-          }}
-        />
-      ) : (
-        <ThemedText style={item.type === 'user' ? styles.userMessageText : styles.assistantMessageText}>
-          {item.content}
-        </ThemedText>
-      )}
-    </ThemedView>
-  );
+      // 更新用户消息
+      await session.updateUserMessage(editingMessage.turn, { text });
+
+      // 重新获取AI回复
+      const answer = await session.refreshChat(editingMessage.turn);
+      if (answer) {
+        await session.createAssistantMessage(answer);
+      }
+
+      // 更新界面
+      setMessages(session.currentMessages);
+    } catch (error) {
+      console.error('更新消息失败:', error);
+      Alert.alert('错误', '更新失败');
+    } finally {
+      setIsLoading(false);
+      setEditingMessage(null);
+    }
+  }, [editingMessage, session]);
+
+  // 处理消息刷新
+  const handleRefreshMessage = useCallback(async (turn: number) => {
+    try {
+      setIsLoading(true);
+      if (!session) throw new Error('会话未创建');
+
+      // 重新获取AI回复
+      const answer = await session.refreshChat(turn);
+      if (answer) {
+        await session.updateAssistantMessage(turn, answer);
+      }
+
+      // 更新界面
+      setMessages(session.currentMessages);
+    } catch (error) {
+      console.error('刷新消息失败:', error);
+      Alert.alert('错误', '刷新失败');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [session]);
+
+  // 处理版本切换
+  const handleSwitchVersion = useCallback(async (turn: number, version: number) => {
+    if (!session) return;
+
+    try {
+      await session.switchVersion(turn, version);
+      setMessages(session?.currentMessages || []);
+    } catch (error) {
+      console.error('切换版本失败:', error);
+      Alert.alert('错误', '切换失败');
+    }
+  }, [session]);
+
+  const renderMessage = useCallback(({ item: message }: { item: ChatMessage }) => {
+    const turn = session?.getTurn(message.turn);
+    if (!turn) return null;
+
+    return (
+      <ThemedView
+        style={[
+          styles.messageContainer,
+          message.role === 'user' ? styles.userMessage : styles.assistantMessage
+        ]}
+      >
+        {message.role === 'assistant' ? (
+          <>
+            <MarkdownLatex
+              content={message.content || ''}
+              textColor={'#000000'}
+              baseStyles={{
+                body: [styles.markdownBody, styles.assistantMessageText],
+              }}
+            />
+            <MessageControls
+              position={turn.turn}
+              version={turn.version}
+              totalVersions={turn.messages.length}
+              onRefresh={() => handleRefreshMessage(turn.turn)}
+              onSwitch={version => handleSwitchVersion(turn.turn, version)}
+            />
+          </>
+        ) : (
+          <>
+            <MarkdownLatex
+              content={message.content || ''}
+              textColor={'#000000'}
+              baseStyles={{
+                body: [styles.markdownBody, styles.userMessageText],
+              }}
+            />
+            <MessageControls
+              position={turn.turn}
+              version={turn.version}
+              totalVersions={turn.messages.length}
+              onEdit={() => handleEditMessage(message, turn.turn)}
+              onSwitch={version => handleSwitchVersion(turn.turn, version)}
+            />
+          </>
+        )}
+      </ThemedView>
+    );
+  }, [session, handleEditMessage, handleRefreshMessage, handleSwitchVersion]);
+
+
 
   return (
     <KeyboardAvoidingView
@@ -381,7 +351,7 @@ export default function HomeScreen() {
       style={styles.container}
     >
 
-      <FlatList
+      <FlatList<ChatMessage>
         data={messages}
         renderItem={renderMessage}
         keyExtractor={item => item.id}
@@ -433,6 +403,13 @@ export default function HomeScreen() {
           </ThemedView>
         </ThemedView>
       </ThemedView>
+
+      <EditMessageDialog
+        visible={!!editingMessage}
+        message={editingMessage?.message.content || ''}
+        onClose={() => setEditingMessage(null)}
+        onSave={handleSaveEdit}
+      />
     </KeyboardAvoidingView>
   );
 }
