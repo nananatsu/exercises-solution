@@ -5,29 +5,31 @@ import { useNavigation } from '@react-navigation/native';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { chatHistory, ChatSession } from '@/services/chat/history';
+import { chatHistory } from '@/services/chat/history';
+import { ChatSession } from '@/services/chat/types';
 
 export default function HistoryScreen() {
   const navigation = useNavigation();
   const [history, setHistory] = useState<ChatSession[]>([]);
-  const [page, setPage] = useState(0);
+  const [nextIdx, setNextIdx] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const isInitialized = useRef(false);
 
-  const loadHistory = useCallback(async (pageNum: number) => {
+  const loadHistory = useCallback(async (idx: number) => {
     if (isLoading) return;
     setIsLoading(true);
     try {
-      console.log('加载历史记录...', pageNum);
-      const items = await chatHistory.loadHistory(pageNum);
-      if (pageNum === 0) {
-        setHistory(items);
+      console.log('加载历史记录...', idx);
+      const { idx: nextIdx, sessions } = await chatHistory.loadHistory(idx);
+      if (idx === 0) {
+        setHistory(sessions);
       } else {
-        setHistory(prev => [...prev, ...items]);
+        setHistory(prev => [...prev, ...sessions]);
       }
-      setHasMore(await chatHistory.hasMoreHistory(pageNum));
-      console.log('加载历史记录完成', items.length);
+      setNextIdx(nextIdx);
+      setHasMore(await chatHistory.hasMoreHistory(nextIdx));
+      console.log('加载历史记录完成', sessions.length);
     } catch (error) {
       console.error('加载历史记录失败:', error);
     } finally {
@@ -40,9 +42,7 @@ export default function HistoryScreen() {
     if (!isInitialized.current) {
       console.log('历史页面首次初始化');
       isInitialized.current = true;
-      chatHistory
-        .initialize()
-        .then(() => loadHistory(0))
+      loadHistory(0)
         .catch(error => console.error('初始化失败:', error));
     }
   }, [loadHistory]);
@@ -60,14 +60,12 @@ export default function HistoryScreen() {
 
   const loadMore = useCallback(() => {
     if (hasMore && !isLoading) {
-      const nextPage = page + 1;
-      setPage(nextPage);
-      loadHistory(nextPage);
+      loadHistory(nextIdx);
     }
-  }, [hasMore, isLoading, page, loadHistory]);
+  }, [hasMore, isLoading, nextIdx, loadHistory]);
 
   const handleRefresh = useCallback(() => {
-    setPage(0);
+    setNextIdx(0);
     loadHistory(0);
   }, [loadHistory]);
 
@@ -81,18 +79,8 @@ export default function HistoryScreen() {
       onPress={() => handleSessionPress(item.id)}
     >
       <ThemedView style={styles.questionContainer}>
-        {item.type === 'image' && item.imageUri && (
-          <Image
-            source={{ uri: item.imageUri }}
-            style={styles.thumbnail}
-          />
-        )}
         <ThemedText style={styles.title}>{item.title}</ThemedText>
       </ThemedView>
-
-      <ThemedText style={styles.messageCount}>
-        {Object.keys(item.messages).length} 条对话
-      </ThemedText>
 
       <ThemedText style={styles.date}>
         {formatDate(item.timestamp)}

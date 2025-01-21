@@ -156,14 +156,26 @@ export class Session {
 
     // 创建用户消息
     async createUserMessage(input: ChatInput): Promise<ChatMessage> {
+        if (!this.session.id) {
+            this.session.id = await chatHistory.getNextSessionId();
+
+            if (!this.session.title && input.text) {
+                this.session.title = input.text;
+            }
+        }
+
         if (input.imageUri && this.needOcr) {
             console.log("识别题目", input.imageUri)
             const text = await this.recognizeText!(input.imageUri);
             if (!text) {
                 throw new Error('识别题目失败');
             }
+            if (!this.session.title) {
+                this.session.title = text;
+            }
             return await this.createMessage(-1, 'user', { text, imageUri: undefined, originalUri: input.originalUri ? input.originalUri : input.imageUri });
         }
+
 
         return await this.createMessage(-1, 'user', input);
     }

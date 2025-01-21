@@ -2,6 +2,7 @@ import { StyleSheet, TouchableOpacity, TextInput, FlatList, KeyboardAvoidingView
 import * as ImagePicker from 'expo-image-picker';
 import { Camera } from 'expo-camera';
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useRoute } from '@react-navigation/native';
 import { storage } from '@/services/storage';
 
 import { ThemedText } from '@/components/ThemedText';
@@ -16,6 +17,8 @@ import { MessageControls } from '@/components/MessageControls';
 import { ChatSession, ChatMessage, ChatConf } from '@/services/chat/types';
 import { Session } from '@/services/chat/session';
 import { EditMessageDialog } from '@/components/EditMessageDialog';
+import { Image } from 'react-native';
+import { ImagePreview } from '@/components/ImagePreview';
 
 interface Settings extends ChatConf {
   imageHost: {
@@ -33,6 +36,7 @@ interface ProcessQuestionOptions {
 }
 
 export default function HomeScreen() {
+  const route = useRoute();
   const [session, setSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
@@ -42,10 +46,26 @@ export default function HomeScreen() {
     message: ChatMessage;
     turn: number;
   } | null>(null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   useEffect(() => {
     loadSettings();
   }, []);
+
+  useEffect(() => {
+    if (!settings) {
+      return;
+    }
+
+    console.log("路由", route)
+
+    if (route.params) {
+      const { sessionId } = route.params as { sessionId: string };
+      loadSession(sessionId);
+    } else {
+      createSession();
+    }
+  }, [route, settings]);
 
   const loadSettings = async () => {
     try {
@@ -58,32 +78,40 @@ export default function HomeScreen() {
     }
   };
 
-  const createSession = async () => {
-    console.log("初始化会话")
-    const sessionId = await chatHistory.getNextSessionId();
-    console.log("创建会话", sessionId)
-    const session = new Session(
-      {
-        models: settings?.models || [],
-        activeOCRModel: settings?.activeOCRModel || '',
-        activeSolvingModel: settings?.activeSolvingModel || ''
-      },
-      {
-        id: sessionId,
-        title: '',
-        turns: [],
-        timestamp: Date.now()
-      },
-      {}
-    );
+  const createSession = useCallback(async () => {
+    try {
+      console.log("初始化会话")
+      // const sessionId = await chatHistory.getNextSessionId();
+      // console.log("创建会话", sessionId)
+      const session = new Session(
+        {
+          models: settings?.models || [],
+          activeOCRModel: settings?.activeOCRModel || '',
+          activeSolvingModel: settings?.activeSolvingModel || ''
+        },
+        {
+          // id: sessionId,
+          id: '',
+          title: '',
+          turns: [],
+          timestamp: Date.now()
+        },
+        {}
+      );
 
-    console.log("更新会话状态·", session)
-    setSession(session);
-    setMessages(session.currentMessages);
-  }
+      console.log("更新会话状态·", session)
+      setSession(session);
+      setMessages(session.currentMessages);
+      return session;
+    } catch (error) {
+      console.error('创建会话失败:', error);
+      Alert.alert('错误', error instanceof Error ? error.message : '创建会话失败');
+    }
+  }, [settings]);
 
   const loadSession = useCallback(async (sessionId: string) => {
     try {
+      console.log("加载会话", sessionId)
       const chatSession = await chatHistory.getSession(sessionId);
       if (chatSession) {
         const messages = await chatHistory.getMessages(chatSession);
@@ -99,19 +127,20 @@ export default function HomeScreen() {
         setSession(session);
         setMessages(session.currentMessages);
       }
+      return session;
     } catch (error) {
       console.error('加载会话失败:', error);
-      Alert.alert('错误', '加载会话失败');
+      Alert.alert('错误', error instanceof Error ? error.message : '加载会话失败');
     }
-  }, []);
+  }, [settings]);
 
   const processQuestion = async (options: ProcessQuestionOptions) => {
     try {
       setIsLoading(true);
 
-      if (!session) {
-        await createSession();
-        console.log("会话状态", session)
+      let chatSession = session;
+      if (!chatSession) {
+        throw new Error('会话未创建');
       }
 
       let questionText = options.text || '';
@@ -119,20 +148,20 @@ export default function HomeScreen() {
 
       console.log("创建用户消息", questionText, imageUrl)
 
-      await session?.createUserMessage({
+      await chatSession?.createUserMessage({
         text: questionText,
         imageUri: imageUrl,
         originalUri: options.originalUri
       });
 
       // 获取LLM回复
-      const answer = await session?.chat();
+      const answer = await chatSession?.chat();
       if (answer) {
-        await session?.createAssistantMessage(answer);
+        await chatSession?.createAssistantMessage(answer);
       }
 
       // 更新界面
-      setMessages(session?.currentMessages || []);
+      setMessages(chatSession?.currentMessages || []);
       setInputText('');
 
     } catch (error) {
@@ -232,21 +261,20 @@ export default function HomeScreen() {
   }, []);
 
   // 保存编辑后的消息
-  const handleSaveEdit = useCallback(async (text: string) => {
+  const handleSaveEdit = useCallback(async (message: ChatMessage) => {
     if (!editingMessage || !session) return;
 
     try {
       setIsLoading(true);
 
       // 更新用户消息
-      await session.updateUserMessage(editingMessage.turn, { text });
+      await session.updateUserMessage(editingMessage.turn, { text: message.content, imageUri: message.imageUri, originalUri: message.originalUri });
 
       // 重新获取AI回复
       const answer = await session.refreshChat(editingMessage.turn);
       if (answer) {
         await session.createAssistantMessage(answer);
       }
-
       // 更新界面
       setMessages(session.currentMessages);
     } catch (error) {
@@ -330,6 +358,17 @@ export default function HomeScreen() {
                 body: [styles.markdownBody, styles.userMessageText],
               }}
             />
+            {(message.originalUri || message.imageUri) && (
+              <TouchableOpacity
+                onPress={() => setPreviewImage(message.originalUri || message.imageUri)}
+              >
+                <Image
+                  source={{ uri: message.originalUri || message.imageUri }}
+                  style={styles.messageImage}
+                  resizeMode="contain"
+                />
+              </TouchableOpacity>
+            )}
             <MessageControls
               position={turn.turn}
               version={turn.version}
@@ -342,8 +381,6 @@ export default function HomeScreen() {
       </ThemedView>
     );
   }, [session, handleEditMessage, handleRefreshMessage, handleSwitchVersion]);
-
-
 
   return (
     <KeyboardAvoidingView
@@ -406,9 +443,15 @@ export default function HomeScreen() {
 
       <EditMessageDialog
         visible={!!editingMessage}
-        message={editingMessage?.message.content || ''}
+        message={editingMessage?.message}
         onClose={() => setEditingMessage(null)}
         onSave={handleSaveEdit}
+      />
+
+      <ImagePreview
+        visible={!!previewImage}
+        imageUri={previewImage || ''}
+        onClose={() => setPreviewImage(null)}
       />
     </KeyboardAvoidingView>
   );
@@ -520,5 +563,10 @@ const styles = StyleSheet.create({
   blockMath: {
     margin: 8,
     alignSelf: 'center',
+  },
+  messageImage: {
+    width: '100%',
+    height: 200,
+    marginBottom: 8,
   },
 });

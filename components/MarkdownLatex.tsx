@@ -4,6 +4,7 @@ import Markdown from 'react-native-markdown-display';
 import KatexView from 'react-native-katex';
 import { ThemedText } from '@/components/ThemedText';
 
+
 interface MarkdownLatexProps {
     content: string;
     textColor?: string;
@@ -20,8 +21,13 @@ interface MarkdownState {
     key: string;
 }
 
+const isWeb = Platform.OS === 'web';
+
 export function MarkdownLatex({ content, textColor = '#000000', baseStyles = {} }: MarkdownLatexProps) {
     const preprocessContent = (text: string) => {
+        if (isWeb) {
+            return text;
+        }
         // 替换各种LaTeX分隔符为统一格式
         text = text
             .replace(/\\\\\[/g, '\n$$') // Replace '\\[' with newline + '$$'

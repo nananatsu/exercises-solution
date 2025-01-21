@@ -72,32 +72,34 @@ export class ChatHistoryManager {
         return messages;
     }
 
-    async loadHistory(page: number = 0): Promise<ChatSession[]> {
+    async loadHistory(idx: number = 0): Promise<{ idx: number, sessions: ChatSession[] }> {
         if (this.currentIdx === -1) {
             this.currentIdx = await storage.getItem<number>(STORAGE_KEYS.CHAT_IDX) || 0;
         }
 
         try {
             const sessions: ChatSession[] = [];
-            const startIdx = Math.max(1, this.currentIdx - (page + 1) * this.batchSize + 1);
-            const endIdx = Math.min(this.currentIdx - page * this.batchSize, this.currentIdx);
+            const endIdx = Math.min(this.currentIdx - idx, this.currentIdx);
 
-            for (let i = endIdx; i >= startIdx; i--) {
+            for (let i = endIdx; i >= 0; i--) {
                 const session = await storage.getItem<ChatSession>(this.getSessionKey(i));
                 if (session) {
                     sessions.push(session);
+                    if (sessions.length >= this.batchSize) {
+                        break;
+                    }
                 }
+                idx++;
             }
-
-            return sessions;
+            return { idx, sessions };
         } catch (error) {
             console.error('加载历史记录失败:', error);
-            return [];
+            return { idx, sessions: [] };
         }
     }
 
-    async hasMoreHistory(page: number): Promise<boolean> {
-        const startIdx = this.currentIdx - (page + 1) * this.batchSize + 1;
+    async hasMoreHistory(idx: number): Promise<boolean> {
+        const startIdx = this.currentIdx - idx;
         return startIdx > 0;
     }
 
